@@ -69,6 +69,9 @@ class SerializerRegistry(object):
         content_type = content_type or 'application/data'
         content_encoding = (content_encoding or 'utf-8').lower()
 
+        if content_encoding not in ('binary', 'ascii-8bit') and not isinstance(data, str):
+            data = codecs.decode(data, content_encoding)
+        
         try:
             decoder = self._decoders[content_type]
         except KeyError:

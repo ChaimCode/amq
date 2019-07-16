@@ -13,15 +13,18 @@ class Message(BaseMessage):
 
 
 class Backend(BaseBackend):
+
+    Message = Message
+
     def get(self, *args, **kwargs):
         """Get the next waiting message from the queue.
         """
         if not mqueue.qsize():
             return None
         message_data, content_type, content_encoding = mqueue.get()
-        return Message(backend=self, body=message_data,
-                       content_type=content_type,
-                       content_encoding=content_encoding)
+        return self.Message(backend=self, body=message_data,
+                            content_type=content_type,
+                            content_encoding=content_encoding)
 
     def consume(self, queue, no_ack, callback, consumer_tag, limit=None):
         """Go into consume mode."""

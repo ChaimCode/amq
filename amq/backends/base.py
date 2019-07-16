@@ -11,12 +11,15 @@ class BaseMessage(object):
     """Base class for received messages."""
     _state = None
 
+    MessageStateError = MessageStateError
+
     def __init__(self, backend, **kwargs):
         self.backend = backend
         self.body = kwargs.get("body")
         self.delivery_tag = kwargs.get("delivery_tag")
         self.content_type = kwargs.get("content_type", "application/json")
         self.content_encoding = kwargs.get("content_encoding")
+        self.delivery_info = kwargs.get("delivery_info", {})
         self._decoded_cache = None
         self._state = "RECEIVED"
 
@@ -38,7 +41,7 @@ class BaseMessage(object):
         """Acknowledge this message as being processed.,
         This will remove the message from the queue."""
         if self.acknowledged:
-            raise MessageStateError(
+            raise self.MessageStateError(
                 f"Message already acknowledged with state: {self._state}")
         self.backend.ack(self.delivery_tag)
         self._state = "ACK"
@@ -48,7 +51,7 @@ class BaseMessage(object):
         The message will be discarded by the server.
         """
         if self.acknowledged:
-            raise MessageStateError(
+            raise self.MessageStateError(
                 f"Message already acknowledged with state: {self._state}")
         self.backend.reject(self.delivery_tag)
         self._state = "REJECTED"
@@ -59,7 +62,7 @@ class BaseMessage(object):
         to process.
         """
         if self.acknowledged:
-            raise MessageStateError(
+            raise self.MessageStateError(
                 f"Message already acknowledged with state: {self._state}")
         self.backend.requeue(self.delivery_tag)
         self._state = "REQUEUED"
@@ -72,6 +75,7 @@ class BaseMessage(object):
 
 class BaseBackend(object):
     """Base class for backends."""
+    default_port = None
 
     def __init__(self, connection, **kwargs):
         self.connection = connection
@@ -107,6 +111,11 @@ class BaseBackend(object):
         """Acknowledge the message."""
         pass
 
+    def queue_purge(self, queue, **kwargs):
+        """Discard all messages in the queue. This will delete the messages
+        and results in an empty queue."""
+        return 0
+
     def reject(self, delivery_tag):
         """Reject the message."""
         pass
@@ -133,4 +142,20 @@ class BaseBackend(object):
 
     def close(self):
         """Close the backend."""
+        pass
+
+    def establish_connection(self):
+        """Establish a connection to the backend."""
+        pass
+
+    def close_connection(self, connection):
+        """Close the connection."""
+        pass
+
+    def flow(self, active):
+        """Enable/disable flow from peer."""
+        pass
+
+    def qos(self, prefetch_size, prefetch_count, apply_global=False):
+        """Request specific Quality of Service."""
         pass

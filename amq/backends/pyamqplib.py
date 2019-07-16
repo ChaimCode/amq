@@ -6,23 +6,29 @@ from amq.backends.base import BaseMessage, BaseBackend
 import itertools
 import warnings
 
+DEFAULT_PORT = 5672
+
 
 class QueueAlreadyExistsWarning(UserWarning):
-    """A queue with that name already exists, so a recently changed
+    """a queue with that name already exists, so a recently changed
     ``routing_key`` or other settings might be ignored unless you
     rename the queue or restart the broker."""
 
 
 class Message(BaseMessage):
-    """A message received by the broker.
+    """a message received by the broker.
     """
 
     def __init__(self, backend, amqp_message, **kwargs):
-        self.amqp_message = amqp_message
+        self._amqp_message = amqp_message
         self.backend = backend
-        kwargs.update({
-            "body": amqp_message.body,
-            "delivery_tag": amqp_message.delivery_tag})
+
+        for attr_name in ("body",
+                          "delivery_tag",
+                          "content_type",
+                          "content_encoding",
+                          "delivery_info"):
+            kwargs[attr_name] = getattr(amqp_message, attr_name, None)
 
         super(Message, self).__init__(backend, **kwargs)
 
@@ -31,9 +37,38 @@ class Backend(BaseBackend):
     """amqplib backend
     """
 
+    default_port = DEFAULT_PORT
+
+    Message = Message
+
     def __init__(self, connection, **kwargs):
         self.connection = connection
-        self.channel = self.connection.connection.channel()
+        self.default_port = kwargs.get("default_port", self.default_port)
+        self._channel = None
+
+    @property
+    def channel(self):
+        """If no channel exists, a new one is requested."""
+        if not self._channel:
+            self._channel = self.connection.get_channel()
+        return self._channel
+
+    def establish_connection(self):
+        """Establish connection to the AMQP broker."""
+        conninfo = self.connection
+        if not conninfo.port:
+            conninfo.port = self.default_port
+        return amqp.Connection(host=conninfo.host,
+                               userid=conninfo.userid,
+                               password=conninfo.password,
+                               virtual_host=conninfo.virtual_host,
+                               insist=conninfo.insist,
+                               ssl=conninfo.ssl,
+                               connect_timeout=conninfo.connect_timeout)
+
+    def close_connection(self, connection):
+        """Close the AMQP broker connection."""
+        connection.close()
 
     def queue_exists(self, queue):
         try:
@@ -58,26 +93,27 @@ class Backend(BaseBackend):
         if warn_if_exists and self.queue_exists(queue):
             warnings.warn(QueueAlreadyExistsWarning(
                 QueueAlreadyExistsWarning.__doc__))
-        self.channel.queue_declare(queue=queue,
-                                   durable=durable,
-                                   exclusive=exclusive,
-                                   auto_delete=auto_delete)
+
+        return self.channel.queue_declare(queue=queue,
+                                          durable=durable,
+                                          exclusive=exclusive,
+                                          auto_delete=auto_delete)
 
     def exchange_declare(self, exchange, type, durable, auto_delete):
         """Declare an named exchange."""
-        self.channel.exchange_declare(exchange=exchange,
-                                      type=type,
-                                      durable=durable,
-                                      auto_delete=auto_delete)
+        return self.channel.exchange_declare(exchange=exchange,
+                                             type=type,
+                                             durable=durable,
+                                             auto_delete=auto_delete)
 
     def queue_bind(self, queue, exchange, routing_key):
         """Bind queue to an exchange using a routing key."""
-        self.channel.queue_bind(queue=queue,
-                                exchange=exchange,
-                                routing_key=routing_key)
+        return self.channel.queue_bind(queue=queue,
+                                       exchange=exchange,
+                                       routing_key=routing_key)
 
     def message_to_python(self, raw_message):
-        return Message(backend=self, amqp_message=raw_message)
+        return self.Message(backend=self, amqp_message=raw_message)
 
     def get(self, queue, no_ack=False):
         """Receive a message from a declared queue by name.
@@ -91,10 +127,10 @@ class Backend(BaseBackend):
         return self.message_to_python(raw_message)
 
     def declare_consume(self, queue, no_ack, callback, consumer_tag):
-        self.channel.basic_consume(queue=queue,
-                                   no_ack=no_ack,
-                                   callback=callback,
-                                   consumer_tag=consumer_tag)
+        return self.channel.basic_consume(queue=queue,
+                                          no_ack=no_ack,
+                                          callback=callback,
+                                          consumer_tag=consumer_tag)
 
     def declare_consumer(self, queue, no_ack, callback, consumer_tag, nowait=False):
         """Declare a consumer."""
@@ -115,6 +151,8 @@ class Backend(BaseBackend):
 
     def cancel(self, consumer_tag):
         """Cancel a channel by consumer tag."""
+        if not self.channel.connection:
+            return
         self.channel.basic_cancel(consumer_tag)
 
     def close(self):

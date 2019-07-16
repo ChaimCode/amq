@@ -1,23 +1,29 @@
+import socket
 from amqplib import client_0_8 as amqp
+from amqplib.client_0_8.connection import AMQPConnectionException
+from amq.backends import get_backend_cls
 
 # seconds
 DEFAULT_CONNECT_TIMEOUT = 5
 
 
-class AMQPConnection:
+class BrokerConnection:
     virtual_host = '/'
-    port = 5672
+    port = None
     insist = False
     connect_timeout = DEFAULT_CONNECT_TIMEOUT
     ssl = False
     _closed = True
+    backend_cls = None
+
+    ConnectionException = AMQPConnectionException
 
     @property
     def host(self):
         """The host as a hostname/port pair separated by colon."""
         return ":".join([self.hostname, str(self.port)])
 
-    def __init__(self, hostname, userid, password,
+    def __init__(self, hostname=None, userid=None, password=None,
                  virtual_host=None, port=None, **kwargs):
         """init connection params"""
         self.hostname = hostname
@@ -29,10 +35,18 @@ class AMQPConnection:
         self.connect_timeout = kwargs.get(
             "connect_timeout", self.connect_timeout)
         self.ssl = kwargs.get("ssl", self.ssl)
-        self.connection = None
+        self.backend_cls = kwargs.get("backend_cls", None)
+        self._closed = None
+        self._connection = None
 
-        # set connection class to self
-        self.connect()
+    @property
+    def connection(self):
+        if self._closed is True:
+            return
+        if not self._connection:
+            self._connection = self._establish_connection()
+            self._closed = False
+        return self._connection
 
     def __enter__(self):
         return self
@@ -42,52 +56,40 @@ class AMQPConnection:
             raise e_type(e_value)
         self.close()
 
+    def _establish_connection(self):
+        return self.create_backend().establish_connection()
+
+    def get_backend_cls(self):
+        """Get the currently used backend class."""
+        backend_cls = self.backend_cls
+        if not backend_cls or isinstance(backend_cls, str):
+            backend_cls = get_backend_cls(backend_cls)
+        return backend_cls
+
+    def create_backend(self):
+        """Create a new instance of the current backend in
+        :attr:`backend_cls`."""
+        backend_cls = self.get_backend_cls()
+        return backend_cls(connection=self)
+
+    def get_channel(self):
+        """Request a new AMQP channel."""
+        return self.connection.channel()
+
     def connect(self):
         """lazy connect to rabbitmq by amqp"""
-        self.connection = amqp.Connection(host=self.host,
-                                          userid=self.userid,
-                                          password=self.password,
-                                          virtual_host=self.virtual_host,
-                                          insist=self.insist,
-                                          ssl=self.ssl,
-                                          connect_timeout=self.connect_timeout)
         self._closed = False
         return self.connection
 
     def close(self):
-        """colse zhe connection"""
-        if self.connection:
-            self.connection.close()
+        """Close the currently open connection."""
+        try:
+            if self._connection:
+                backend = self.create_backend()
+                backend.close_connection(self._connection)
+        except socket.error:
+            pass
         self._closed = True
 
 
-class DummyConnection(object):
-    """A connection class that does nothing, for non-networked backends."""
-    _closed = True
-
-    def __init__(self, *args, **kwargs):
-        self._closed = False
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, e_type, e_value, e_trace):
-        if e_type:
-            raise e_type(e_value)
-        self.close()
-
-    def connect(self):
-        """Doesn't do anything. Just for API compatibility."""
-        pass
-
-    def close(self):
-        """Doesn't do anything. Just for API compatibility."""
-        self._closed = True
-
-    @property
-    def host(self):
-        """Always empty string."""
-        return ""
-
-
-BrokerConnection = AMQPConnection
+AMQPConnection = BrokerConnection

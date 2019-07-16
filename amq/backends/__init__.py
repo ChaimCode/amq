@@ -1,8 +1,15 @@
 """amq.backends"""
 import sys
-from functools import partial
 
 DEFAULT_BACKEND = "pyamqplib"
+BACKEND_ALIASES = {
+    "amqp": "pyamqplib",
+    "amqplib": "pyamqplib",
+    "stomp": "pystomp",
+    "stompy": "pystomp",
+    "memory": "queue",
+    "mem": "queue",
+}
 
 
 def get_backend_cls(backend):
@@ -11,25 +18,13 @@ def get_backend_cls(backend):
     ``"amq.backends."`` will be prepended to the name. e.g.
     ``"pyqueue"`` becomes ``"amq.backends.pyqueue"``.
     """
+    if not backend:
+        backend = DEFAULT_BACKEND
+    
     # usually backend = DEFAULT_BACKEND
     if backend.find(".") == -1:
-        backend = f"amq.backends.{backend}"
+        alias_to = BACKEND_ALIASES.get(backend.lower(), None)
+        backend = f"amq.backends.{alias_to or backend}"
     __import__(backend)
     backend_module = sys.modules[backend]
     return getattr(backend_module, "Backend")
-
-
-"""
-.. function:: get_default_backend_cls()
-    Get the default backend class.
-    Default is ``DEFAULT_BACKEND``.
-"""
-get_default_backend_cls = partial(get_backend_cls, DEFAULT_BACKEND)
-
-
-"""
-.. class:: DefaultBackend
-    The default backend class.
-    This is the class specified in ``DEFAULT_BACKEND``.
-"""
-DefaultBackend = get_default_backend_cls()

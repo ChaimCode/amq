@@ -1,5 +1,4 @@
 from amq.connection import BrokerConnection
-from amq.backends.queue import Backend
 from amq.messaging import Messaging
 
 
@@ -10,9 +9,10 @@ def import_feed_callback(message_data, message):
 
 
 conn = BrokerConnection(hostname="localhost", port=5672,
-                        userid="guest", password="guest", virtual_host="/")
+                        userid="guest", password="guest",
+                        virtual_host="/", backend_cls='mem')
 
-m = Messaging(connection=conn, exchange="feed", routing_key="importer", backend_cls=Backend)
+m = Messaging(connection=conn, exchange="feed", routing_key="importer")
 m.send({"import_feed": "http://cnn.com/rss/edition.rss"})
 print('send msg ...')
 

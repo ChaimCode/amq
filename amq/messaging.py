@@ -1,5 +1,4 @@
 import uuid
-from amq.backends import DefaultBackend
 from amq import serialization
 
 
@@ -14,7 +13,6 @@ class Consumer(object):
     # to show zhe channel status
     channel_open = False
     warn_if_exists = False
-    backend_cls = DefaultBackend
     auto_ack = False
     no_ack = False
     _closed = True
@@ -22,8 +20,8 @@ class Consumer(object):
     def __init__(self, connection, queue=None, exchange=None, routing_key=None,
                  **kwargs):
         self.connection = connection
-        self.backend_cls = kwargs.get("backend_cls", self.backend_cls)
-        self.backend = self.backend_cls(connection=connection)
+        self.backend_cls = kwargs.get("backend_cls", None)
+        self.backend = self.connection.create_backend()
 
         # Binding.
         self.queue = queue or self.queue
@@ -87,7 +85,7 @@ class Consumer(object):
             if auto_ack and not message.acknowledged:
                 message.ack()
             if enable_callbacks:
-                self._receive_callback(message)
+                self.receive(message.payload, message)
         return message
 
     def receive(self, message_data, message):
@@ -180,13 +178,32 @@ class Consumer(object):
         self.backend.close()
         self._closed = True
 
+    def flow(self, active):
+        """This method asks the peer to pause or restart the flow of
+        content data.
+
+        This is a simple flow-control mechanism that a
+        peer can use to avoid oveflowing its queues or otherwise
+        finding itself receiving more messages than it can process.
+        Note that this method is not intended for window control.  The
+        peer that receives a request to stop sending content should
+        finish sending the current content, if any, and then wait
+        until it receives the ``flow(active=True)`` restart method.
+
+        """
+        self.backend.flow(active)
+
+    def qos(self, prefetch_size=0, prefetch_count=0, apply_global=False):
+        """Request specific Quality of Service. It's similar to special priority queue
+        """
+        return self.backend.qos(prefetch_size, prefetch_count, apply_global)
+
 
 class Publisher:
     exchange = ""
     routing_key = ""
     # persistent
     delivery_mode = 2
-    backend_cls = DefaultBackend
     _closed = True
     exchange_type = "direct"
     durable = True
@@ -195,8 +212,7 @@ class Publisher:
 
     def __init__(self, connection, exchange=None, routing_key=None, **kwargs):
         self.connection = connection
-        self.backend_cls = kwargs.get("backend_cls", self.backend_cls)
-        self.backend = self.backend_cls(connection=connection)
+        self.backend = self.connection.create_backend()
         self.exchange = exchange or self.exchange
         self.routing_key = routing_key or self.routing_key
         self.delivery_mode = kwargs.get("delivery_mode", self.delivery_mode)
@@ -271,19 +287,17 @@ class Messaging(object):
 
     def __init__(self, connection, **kwargs):
         self.connection = connection
-        self.backend_cls = kwargs.get("backend_cls")
         self.exchange = kwargs.get("exchange", self.exchange)
         self.queue = kwargs.get("queue", self.queue)
         self.routing_key = kwargs.get("routing_key", self.routing_key)
         self.publisher = self.publisher_cls(connection,
                                             exchange=self.exchange,
                                             routing_key=self.routing_key,
-                                            backend_cls=self.backend_cls)
+                                            )
         self.consumer = self.consumer_cls(connection,
                                           queue=self.queue,
                                           exchange=self.exchange,
-                                          routing_key=self.routing_key,
-                                          backend_cls=self.backend_cls)
+                                          routing_key=self.routing_key)
         self.consumer.register_callback(self.receive)
         self.callbacks = []
         self._closed = False
@@ -320,3 +334,116 @@ class Messaging(object):
         self.consumer.close()
         self.publisher.close()
         self._closed = True
+
+
+class ConsumerSet(object):
+    """Receive messages from multiple consumers.
+    """
+    auto_ack = False
+
+    def __init__(self, connection, from_dict=None, consumers=None,
+                 callbacks=None, **options):
+        self.connection = connection
+        self.options = options
+        self.from_dict = from_dict or {}
+        self.consumers = consumers or []
+        self.callbacks = callbacks or []
+        self._open_channels = []
+
+        self.backend = self.connection.create_backend()
+
+        self.auto_ack = options.get("auto_ack", self.auto_ack)
+
+        [self.add_consumer_from_dict(queue_name, **queue_options)
+         for queue_name, queue_options in self.from_dict.items()]
+
+    def _receive_callback(self, raw_message):
+        """Internal method used when a message is received in consume mode."""
+        message = self.backend.message_to_python(raw_message)
+        if self.auto_ack and not message.acknowledged:
+            message.ack()
+        self.receive(message.decode(), message)
+
+    def add_consumer_from_dict(self, queue, **options):
+        """Add another consumer from dictionary configuration."""
+        consumer = Consumer(self.connection, queue=queue,
+                            backend=self.backend, **options)
+        self.consumers.append(consumer)
+
+    def add_consumer(self, consumer):
+        """Add another consumer from a :class:`Consumer` instance."""
+        consumer.backend = self.backend
+        self.consumers.append(consumer)
+
+    def register_callback(self, callback):
+        """Register new callback to be called when a message is received.
+        See :meth:`Consumer.register_callback`"""
+        self.callbacks.append(callback)
+
+    def receive(self, message_data, message):
+        """What to do when a message is received.
+        See :meth:`Consumer.receive`."""
+        if not self.callbacks:
+            raise NotImplementedError("No consumer callbacks registered")
+        for callback in self.callbacks:
+            callback(message_data, message)
+
+    def _declare_consumer(self, consumer, nowait=False):
+        """Declare consumer so messages can be received from it using
+        :meth:`iterconsume`."""
+        # Use the ConsumerSet's consumer by default, but if the
+        # child consumer has a callback, honor it.
+        callback = consumer.callbacks and \
+            consumer._receive_callback or self._receive_callback
+        self.backend.declare_consumer(queue=consumer.queue,
+                                      no_ack=consumer.no_ack,
+                                      nowait=nowait,
+                                      callback=callback,
+                                      consumer_tag=consumer.consumer_tag)
+        self._open_channels.append(consumer.consumer_tag)
+
+    def iterconsume(self, limit=None):
+        """Cycle between all consumers in consume mode.
+        See :meth:`Consumer.iterconsume`.
+        """
+        head = self.consumers[:-1]
+        tail = self.consumers[-1]
+        [self._declare_consumer(consumer, nowait=True)
+         for consumer in head]
+        self._declare_consumer(tail, nowait=False)
+
+        return self.backend.consume(limit=limit)
+
+    def discard_all(self):
+        """Discard all messages. Does not support filtering.
+        See :meth:`Consumer.discard_all`."""
+        return sum([consumer.discard_all()
+                    for consumer in self.consumers])
+
+    def flow(self, active):
+        """This method asks the peer to pause or restart the flow of
+        content data.
+        See :meth:`Consumer.flow`.
+        """
+        self.backend.flow(active)
+
+    def qos(self, prefetch_size=0, prefetch_count=0, apply_global=False):
+        """Request specific Quality of Service.
+        See :meth:`Consumer.cos`.
+        """
+        self.backend.qos(prefetch_size, prefetch_count, apply_global)
+
+    def cancel(self):
+        """Cancel a running :meth:`iterconsume` session."""
+        for consumer_tag in self._open_channels:
+            try:
+                self.backend.cancel(consumer_tag)
+            except KeyError:
+                pass
+        self._open_channels = []
+
+    def close(self):
+        """Close all consumers."""
+        self.cancel()
+        for consumer in self.consumers:
+            consumer.close()
