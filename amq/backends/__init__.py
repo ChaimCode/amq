@@ -1,5 +1,6 @@
 """amq.backends"""
 import sys
+from amq.utils import rpartition
 
 DEFAULT_BACKEND = "amq.backends.pyamqplib.Backend"
 
@@ -16,7 +17,8 @@ _backend_cache = {}
 
 
 def resolve_backend(backend=None):
-    backend_module_name, _, backend_cls_name = BACKEND_ALIASES[backend].rpartition(".")
+    backend = BACKEND_ALIASES.get(backend, backend)
+    backend_module_name, _, backend_cls_name = rpartition(backend, ".")
     return backend_module_name, backend_cls_name
 
 

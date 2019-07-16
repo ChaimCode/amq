@@ -26,18 +26,38 @@ class Backend(BaseBackend):
                             content_type=content_type,
                             content_encoding=content_encoding)
 
-    def consume(self, queue, no_ack, callback, consumer_tag, limit=None):
-        """Go into consume mode."""
-        for total_message_count in itertools.count():
-            message = self.get()
-            if message:
-                callback(message.decode(), message)
+    def establish_connection(self):
+        # for drain_events
+        return self
+
+    def drain_events(self, timeout=None):
+        message = self.get()
+        if message:
+            self.callback(message)
+        else:
             time.sleep(0.1)
 
-    def purge(self, queue, **kwargs):
+    def consume(self, limit=None):
+        """Go into consume mode."""
+        for total_message_count in itertools.count():
+            if limit and total_message_count >= limit:
+                raise StopIteration
+            self.drain_events()
+            yield True
+
+    def declare_consumer(self, queue, no_ack, callback, consumer_tag,
+                         nowait=False):
+        self.queue = queue
+        self.no_ack = no_ack
+        self.callback = callback
+        self.consumer_tag = consumer_tag
+        self.nowait = nowait
+
+    def queue_purge(self, queue, **kwargs):
         """Discard all messages in the queue."""
-        mqueue = Queue()
-        return mqueue
+        qsize = mqueue.qsize()
+        mqueue.queue.clear()
+        return qsize
 
     def prepare_message(self, message_data, delivery_mode,
                         content_type, content_encoding, **kwargs):

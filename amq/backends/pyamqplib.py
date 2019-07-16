@@ -1,13 +1,95 @@
 """`amqplib`_ backend for amq.
 """
+from amqplib.client_0_8 import transport
 from amqplib import client_0_8 as amqp
 from amqplib.client_0_8.exceptions import AMQPChannelException
+from amqplib.client_0_8.serialization import AMQPReader, AMQPWriter
 from amq.backends.base import BaseMessage, BaseBackend
 import itertools
 import warnings
 import weakref
 
 DEFAULT_PORT = 5672
+
+
+class Connection(amqp.Connection):
+
+    def drain_events(self, allowed_methods=None, timeout=None):
+        """Wait for an event on any channel."""
+        return self.wait_multi(self.channels.values(), timeout=timeout)
+
+    def wait_multi(self, channels, allowed_methods=None, timeout=None):
+        """Wait for an event on a channel."""
+        chanmap = dict((chan.channel_id, chan) for chan in channels)
+        chanid, method_sig, args, content = self._wait_multiple(
+            chanmap.keys(), allowed_methods, timeout=timeout)
+
+        channel = chanmap[chanid]
+
+        if content \
+                and channel.auto_decode \
+                and hasattr(content, 'content_encoding'):
+            try:
+                content.body = content.body.decode(content.content_encoding)
+            except Exception:
+                pass
+
+        amqp_method = channel._METHOD_MAP.get(method_sig, None)
+
+        if amqp_method is None:
+            raise Exception('Unknown AMQP method (%d, %d)' % method_sig)
+
+        if content is None:
+            return amqp_method(channel, args)
+        else:
+            return amqp_method(channel, args, content)
+
+    def read_timeout(self, timeout=None):
+        if timeout is None:
+            return self.method_reader.read_method()
+        sock = self.transport.sock
+        prev = sock.gettimeout()
+        sock.settimeout(timeout)
+        try:
+            return self.method_reader.read_method()
+        finally:
+            sock.settimeout(prev)
+
+    def _wait_multiple(self, channel_ids, allowed_methods, timeout=None):
+        for channel_id in channel_ids:
+            method_queue = self.channels[channel_id].method_queue
+            for queued_method in method_queue:
+                method_sig = queued_method[0]
+                if (allowed_methods is None) \
+                        or (method_sig in allowed_methods) \
+                        or (method_sig == (20, 40)):
+                    method_queue.remove(queued_method)
+                    method_sig, args, content = queued_method
+                    return channel_id, method_sig, args, content
+
+        # Nothing queued, need to wait for a method from the peer
+        while True:
+            channel, method_sig, args, content = self.read_timeout(timeout)
+
+            if (channel in channel_ids) \
+                and ((allowed_methods is None)
+                     or (method_sig in allowed_methods)
+                     or (method_sig == (20, 40))):
+                return channel, method_sig, args, content
+
+            # Not the channel and/or method we were looking for. Queue
+            # this method for later
+            self.channels[channel].method_queue.append((method_sig,
+                                                        args,
+                                                        content))
+
+            #
+            # If we just queued up a method for channel 0 (the Connection
+            # itself) it's probably a close method in reaction to some
+            # error, so deal with it right away.
+            #
+            if channel == 0:
+                self.wait()
 
 
 class QueueAlreadyExistsWarning(UserWarning):
@@ -55,21 +137,28 @@ class Backend(BaseBackend):
     def channel(self):
         """If no channel exists, a new one is requested."""
         if not self._channel:
-            self._channel_ref = weakref.ref(self.connection.get_channel())
+            connection = self.connection.connection
+            self._channel_ref = weakref.ref(connection.channel())
         return self._channel
 
     def establish_connection(self):
         """Establish connection to the AMQP broker."""
         conninfo = self.connection
+        if not conninfo.hostname:
+            raise KeyError("Missing hostname for AMQP connection.")
+        if conninfo.userid is None:
+            raise KeyError("Missing user id for AMQP connection.")
+        if conninfo.password is None:
+            raise KeyError("Missing password for AMQP connection.")
         if not conninfo.port:
             conninfo.port = self.default_port
-        return amqp.Connection(host=conninfo.host,
-                               userid=conninfo.userid,
-                               password=conninfo.password,
-                               virtual_host=conninfo.virtual_host,
-                               insist=conninfo.insist,
-                               ssl=conninfo.ssl,
-                               connect_timeout=conninfo.connect_timeout)
+        return Connection(host=conninfo.host,
+                          userid=conninfo.userid,
+                          password=conninfo.password,
+                          virtual_host=conninfo.virtual_host,
+                          insist=conninfo.insist,
+                          ssl=conninfo.ssl,
+                          connect_timeout=conninfo.connect_timeout)
 
     def close_connection(self, connection):
         """Close the AMQP broker connection."""
@@ -86,13 +175,17 @@ class Backend(BaseBackend):
         else:
             return True
 
+    def queue_delete(self, queue, if_unused=False, if_empty=False):
+        """Delete queue by name."""
+        return self.channel.queue_delete(queue, if_unused, if_empty)
+
     def queue_purge(self, queue, **kwargs):
         """Discard all messages in the queue. This will delete the messages
         and results in an empty queue."""
         return self.channel.queue_purge(queue=queue)
 
     def queue_declare(self, queue, durable, exclusive, auto_delete,
-                      warn_if_exists=False):
+                      warn_if_exists=False, arguments=None):
         """Declare a named queue."""
 
         if warn_if_exists and self.queue_exists(queue):
@@ -102,7 +195,8 @@ class Backend(BaseBackend):
         return self.channel.queue_declare(queue=queue,
                                           durable=durable,
                                           exclusive=exclusive,
-                                          auto_delete=auto_delete)
+                                          auto_delete=auto_delete,
+                                          arguments=arguments)
 
     def exchange_declare(self, exchange, type, durable, auto_delete):
         """Declare an named exchange."""
@@ -111,11 +205,12 @@ class Backend(BaseBackend):
                                              durable=durable,
                                              auto_delete=auto_delete)
 
-    def queue_bind(self, queue, exchange, routing_key):
+    def queue_bind(self, queue, exchange, routing_key, arguments=None):
         """Bind queue to an exchange using a routing key."""
         return self.channel.queue_bind(queue=queue,
                                        exchange=exchange,
-                                       routing_key=routing_key)
+                                       routing_key=routing_key,
+                                       arguments=arguments)
 
     def message_to_python(self, raw_message):
         return self.Message(backend=self, amqp_message=raw_message)
@@ -151,6 +246,10 @@ class Backend(BaseBackend):
         for total_message_count in itertools.count():
             if limit and total_message_count >= limit:
                 raise StopIteration
+            
+            if not self.channel.is_open:
+                raise StopIteration
+            
             self.channel.wait()
             yield True
 
@@ -188,20 +287,22 @@ class Backend(BaseBackend):
         return message
 
     def publish(self, message, exchange, routing_key, mandatory=None,
-                immediate=None):
+                immediate=None, headers=None):
         """Publish a message to a named exchange."""
+        if headers:
+            message.properties["headers"] = headers
         ret = self.channel.basic_publish(message, exchange=exchange,
-                                          routing_key=routing_key,
-                                          mandatory=mandatory,
-                                          immediate=immediate)
+                                         routing_key=routing_key,
+                                         mandatory=mandatory,
+                                         immediate=immediate)
         if mandatory or immediate:
             self.close()
         return ret
-        
+
     def qos(self, prefetch_size, prefetch_count, apply_global=False):
         """Request specific Quality of Service."""
         self.channel.basic_qos(prefetch_size, prefetch_count,
-                                apply_global)
+                               apply_global)
 
     def flow(self, active):
         """Enable/disable flow from peer."""

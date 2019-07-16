@@ -1,4 +1,6 @@
 import uuid
+from functools import partial
+from itertools import count
 from amq import serialization
 
 
@@ -15,8 +17,14 @@ class Consumer(object):
     warn_if_exists = False
     auto_declare = True
     auto_ack = False
+    queue_arguments = None
     no_ack = False
     _closed = True
+    _init_opts = ("durable", "exclusive", "auto_delete",
+                  "exchange_type", "warn_if_exists",
+                  "auto_ack", "auto_declare",
+                  "queue_arguments")
+    _next_consumer_tag = partial(next, count(1))
 
     def __init__(self, connection, queue=None, exchange=None, routing_key=None,
                  **kwargs):
@@ -31,13 +39,10 @@ class Consumer(object):
         self.callbacks = []
 
         # Options
-        self.durable = kwargs.get("durable", self.durable)
-        self.exclusive = kwargs.get("exclusive", self.exclusive)
-        self.auto_delete = kwargs.get("auto_delete", self.auto_delete)
-        self.exchange_type = kwargs.get("exchange_type", self.exchange_type)
-        self.warn_if_exists = kwargs.get("warn_if_exists", self.warn_if_exists)
-        self.auto_ack = kwargs.get("auto_ack", self.auto_ack)
-        self.auto_declare = kwargs.get("auto_declare", self.auto_declare)
+        for opt_name in self._init_opts:
+            opt_value = kwargs.get(opt_name)
+            if opt_value is not None:
+                setattr(self, opt_name, opt_value)
 
         # exclusive implies auto-delete.
         if self.exclusive:
@@ -49,7 +54,7 @@ class Consumer(object):
 
     def _generate_consumer_tag(self):
         """generate consumer tag with uuid4"""
-        return f"{self.__class__.__module__}.{self.__class__.__name__}-{str(uuid.uuid4())}"
+        return f"{self.__class__.__module__}.{self.__class__.__name__}-{self._next_consumer_tag()}"
 
     def declare(self):
         """constructe channel:
@@ -57,10 +62,16 @@ class Consumer(object):
             2. declare exchange
             3. bind queue and exchange
         """
+        arguments = None
+        routing_key = self.routing_key
+        if self.exchange_type == "headers":
+            arguments, routing_key = routing_key, ""
+
         if self.queue:
             self.backend.queue_declare(queue=self.queue, durable=self.durable,
                                        exclusive=self.exclusive,
                                        auto_delete=self.auto_delete,
+                                       arguments=self.queue_arguments,
                                        warn_if_exists=self.warn_if_exists)
         if self.exchange:
             self.backend.exchange_declare(exchange=self.exchange,
@@ -68,8 +79,10 @@ class Consumer(object):
                                           durable=self.durable,
                                           auto_delete=self.auto_delete)
         if self.queue:
-            self.backend.queue_bind(queue=self.queue, exchange=self.exchange,
-                                    routing_key=self.routing_key)
+            self.backend.queue_bind(queue=self.queue,
+                                    exchange=self.exchange,
+                                    routing_key=routing_key,
+                                    arguments=arguments)
         self._closed = False
         return self
 
@@ -145,12 +158,16 @@ class Consumer(object):
         reached.
 
         """
+        self.consume(no_ack=no_ack)
+        return self.backend.consume(limit=limit)
+
+    def consume(self, no_ack=None):
+        """Declare consumer."""
         self.backend.declare_consumer(queue=self.queue,
                                       no_ack=no_ack or self.no_ack,
                                       callback=self._receive_callback,
                                       consumer_tag=self.consumer_tag)
         self.channel_open = True
-        return self.backend.consume(limit=limit)
 
     def wait(self, limit=None):
         """Go into consume mode.
@@ -203,28 +220,40 @@ class Consumer(object):
 
 
 class Publisher:
+
+    NONE_PERSISTENT_DELIVERY_MODE = 1
+    TRANSIENT_DELIVERY_MODE = 1
+    PERSISTENT_DELIVERY_MODE = 2
+    DELIVERY_MODES = {
+        "transient": TRANSIENT_DELIVERY_MODE,
+        "persistent": PERSISTENT_DELIVERY_MODE,
+        "non-persistent": TRANSIENT_DELIVERY_MODE,
+    }
+
     exchange = ""
     routing_key = ""
     # persistent
-    delivery_mode = 2
+    delivery_mode = PERSISTENT_DELIVERY_MODE
     _closed = True
     exchange_type = "direct"
     durable = True
     auto_delete = False
     auto_declare = True
     serializer = None
+    _init_opts = ("exchange_type", "durable", "auto_delete",
+                  "serializer", "delivery_mode", "auto_declare")
 
     def __init__(self, connection, exchange=None, routing_key=None, **kwargs):
         self.connection = connection
         self.backend = self.connection.create_backend()
         self.exchange = exchange or self.exchange
         self.routing_key = routing_key or self.routing_key
-        self.delivery_mode = kwargs.get("delivery_mode", self.delivery_mode)
-        self.exchange_type = kwargs.get("exchange_type", self.exchange_type)
-        self.durable = kwargs.get("durable", self.durable)
-        self.auto_delete = kwargs.get("auto_delete", self.auto_delete)
-        self.serializer = kwargs.get("serializer", self.serializer)
-        self.auto_declare = kwargs.get("auto_declare", self.auto_declare)
+        for opt_name in self._init_opts:
+            opt_value = kwargs.get(opt_name)
+            if opt_value is not None:
+                setattr(self, opt_name, opt_value)
+        self.delivery_mode = self.DELIVERY_MODES.get(
+            self.delivery_mode, self.delivery_mode)
         self._closed = False
 
         if self.auto_declare and self.exchange:
@@ -241,8 +270,6 @@ class Publisher:
         return self
 
     def __exit__(self, e_type, e_value, e_trace):
-        if e_type:
-            raise e_type(e_value)
         self.close()
 
     def create_message(self, message_data, delivery_mode=None, priority=None,
@@ -264,7 +291,15 @@ class Publisher:
 
     def send(self, message_data, routing_key=None, delivery_mode=None,
              mandatory=False, immediate=False, priority=0, content_type=None,
-             content_encoding=None, serializer=None):
+             content_encoding=None, serializer=None, exchange=None):
+        headers = None
+        routing_key = routing_key or self.routing_key
+
+        if self.exchange_type == "headers":
+            headers, routing_key = routing_key, ""
+
+        exchange = exchange or self.exchange
+
         routing_key = routing_key or self.routing_key
         message = self.create_message(message_data, priority=priority,
                                       delivery_mode=delivery_mode,
@@ -272,10 +307,11 @@ class Publisher:
                                       content_encoding=content_encoding,
                                       serializer=serializer)
         self.backend.publish(message,
-                             exchange=self.exchange,
+                             exchange=exchange,
                              routing_key=routing_key,
                              mandatory=mandatory,
-                             immediate=immediate)
+                             immediate=immediate,
+                             headers=headers)
 
     def close(self):
         """Close connection to queue."""
@@ -353,13 +389,16 @@ class ConsumerSet(object):
         self.connection = connection
         self.options = options
         self.from_dict = from_dict or {}
-        self.consumers = consumers or []
+        self.consumers = []
         self.callbacks = callbacks or []
-        self._open_consumers = []
+        self._open_consumers = {}
 
         self.backend = self.connection.create_backend()
 
         self.auto_ack = options.get("auto_ack", self.auto_ack)
+
+        if consumers:
+            [self.add_consumer(consumer) for consumer in consumers]
 
         [self.add_consumer_from_dict(queue_name, **queue_options)
          for queue_name, queue_options in self.from_dict.items()]
@@ -376,6 +415,7 @@ class ConsumerSet(object):
         consumer = Consumer(self.connection, queue=queue,
                             backend=self.backend, **options)
         self.consumers.append(consumer)
+        return consumer
 
     def add_consumer(self, consumer):
         """Add another consumer from a :class:`Consumer` instance."""
@@ -400,25 +440,29 @@ class ConsumerSet(object):
         :meth:`iterconsume`."""
         # Use the ConsumerSet's consumer by default, but if the
         # child consumer has a callback, honor it.
-        callback = consumer.callbacks and \
-            consumer._receive_callback or self._receive_callback
-        self.backend.declare_consumer(queue=consumer.queue,
-                                      no_ack=consumer.no_ack,
-                                      nowait=nowait,
-                                      callback=callback,
-                                      consumer_tag=consumer.consumer_tag)
-        self._open_consumers.append(consumer.consumer_tag)
+        if consumer.queue not in self._open_consumers:
+            callback = consumer.callbacks and \
+                consumer._receive_callback or self._receive_callback
+            self.backend.declare_consumer(queue=consumer.queue,
+                                          no_ack=consumer.no_ack,
+                                          nowait=nowait,
+                                          callback=callback,
+                                          consumer_tag=consumer.consumer_tag)
+            self._open_consumers.append(consumer.consumer_tag)
 
-    def iterconsume(self, limit=None):
-        """Cycle between all consumers in consume mode.
-        See :meth:`Consumer.iterconsume`.
-        """
+    def consume(self):
+        """Declare consumers."""
         head = self.consumers[:-1]
         tail = self.consumers[-1]
         [self._declare_consumer(consumer, nowait=True)
          for consumer in head]
         self._declare_consumer(tail, nowait=False)
 
+    def iterconsume(self, limit=None):
+        """Cycle between all consumers in consume mode.
+        See :meth:`Consumer.iterconsume`.
+        """
+        self.consume()
         return self.backend.consume(limit=limit)
 
     def discard_all(self):
@@ -442,12 +486,16 @@ class ConsumerSet(object):
 
     def cancel(self):
         """Cancel a running :meth:`iterconsume` session."""
-        for consumer_tag in self._open_consumers:
+        for consumer_tag in self._open_consumers.values():
             try:
                 self.backend.cancel(consumer_tag)
             except KeyError:
                 pass
-        self._open_consumers = []
+        self._open_consumers.clear()
+
+    def cancel_by_queue(self, queue):
+        consumer_tag = self._open_consumers.pop(queue)
+        self.backend.cancel(consumer_tag)
 
     def close(self):
         """Close all consumers."""
