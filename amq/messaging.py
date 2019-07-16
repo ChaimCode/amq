@@ -1,3 +1,4 @@
+from functools import partial
 from amqplib import client_0_8 as amqp
 from json import dumps as serialize
 from json import loads as deserialize
@@ -35,7 +36,8 @@ class Consumer(object):
         """
         channel = self.connection.connection.channel()
         if self.queue:
-            channel.queue_declare(queue=self.queue, durable=self.durable,
+            channel.queue_declare(queue=self.queue, 
+                                  durable=self.durable,
                                   exclusive=self.exclusive,
                                   auto_delete=self.auto_delete)
         if self.exchange:
@@ -44,7 +46,8 @@ class Consumer(object):
                                      durable=self.durable,
                                      auto_delete=self.auto_delete)
         if self.queue:
-            channel.queue_bind(queue=self.queue, exchange=self.exchange,
+            channel.queue_bind(queue=self.queue, 
+                               exchange=self.exchange,
                                routing_key=self.routing_key)
         return channel
     
@@ -53,13 +56,13 @@ class Consumer(object):
             message_data: message content
             message: message object
         """
+        message.ack = partial(self.channel.basic_ack, message.delivery_tag)
         message_data = deserialize(message.body)
         self.receive(message_data, message)
     
     def receive(self, message_data, message):
         """depend on register_callback hook"""
-        raise NotImplementedError(
-                "Consumers must implement the receive method")
+        raise NotImplementedError("Consumers must implement the receive method")
     
     def register_callback(self, func):
         """implement receive"""
@@ -77,7 +80,8 @@ class Consumer(object):
         self.channel.basic_consume(queue=self.queue, no_ack=False,
                                 callback=self.receive_callback,
                                 consumer_tag=self.__class__.__name__)
-        # yield self.channel.wait()
+        while self.channel.callbacks:
+            self.channel.wait()
 
     def next(self):
         """get next message"""
