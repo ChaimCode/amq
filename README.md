@@ -1,0 +1,2 @@
+# amq
+common msg lib.
