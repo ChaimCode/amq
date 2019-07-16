@@ -1,4 +1,3 @@
-from functools import partial
 from amqplib import client_0_8 as amqp
 from json import dumps as serialize
 from json import loads as deserialize
@@ -50,7 +49,7 @@ class Consumer(object):
 
     def __init__(self, connection, queue=None, exchange=None, routing_key=None,
                  **kwargs):
-        self.connection = connection.connection()
+        self.connection = connection
         self.queue = queue or self.queue
         self.exchange = exchange or self.exchange
         self.routing_key = routing_key or self.routing_key
@@ -166,7 +165,7 @@ class Publisher:
     delivery_mode = 2
 
     def __init__(self, connection, exchange=None, routing_key=None, **kwargs):
-        self.connection = connection.connection()
+        self.connection = connection
         self.exchange = exchange or self.exchange
         self.routing_key = routing_key or self.routing_key
         self.delivery_mode = kwargs.get("delivery_mode", self.delivery_mode)
