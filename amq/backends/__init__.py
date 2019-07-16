@@ -1,30 +1,39 @@
 """amq.backends"""
 import sys
 
-DEFAULT_BACKEND = "pyamqplib"
+DEFAULT_BACKEND = "amq.backends.pyamqplib.Backend"
+
 BACKEND_ALIASES = {
-    "amqp": "pyamqplib",
-    "amqplib": "pyamqplib",
-    "stomp": "pystomp",
-    "stompy": "pystomp",
-    "memory": "queue",
-    "mem": "queue",
+    "amqp": "amq.backends.pyamqplib.Backend",
+    "amqplib": "amq.backends.pyamqplib.Backend",
+    "stomp": "amq.backends.pystomp.Backend",
+    "stompy": "amq.backends.pystomp.Backend",
+    "memory": "amq.backends.queue.Backend",
+    "mem": "amq.backends.queue.Backend",
 }
 
+_backend_cache = {}
 
-def get_backend_cls(backend):
+
+def resolve_backend(backend=None):
+    backend_module_name, _, backend_cls_name = BACKEND_ALIASES[backend].rpartition(".")
+    return backend_module_name, backend_cls_name
+
+
+def _get_backend_cls(backend=None):
+    backend_module_name, backend_cls_name = resolve_backend(backend)
+    __import__(backend_module_name)
+    backend_module = sys.modules[backend_module_name]
+    return getattr(backend_module, backend_cls_name)
+
+
+def get_backend_cls(backend=None):
     """Get backend class by name.
     If the name does not include "``.``" (is not fully qualified),
     ``"amq.backends."`` will be prepended to the name. e.g.
     ``"pyqueue"`` becomes ``"amq.backends.pyqueue"``.
     """
-    if not backend:
-        backend = DEFAULT_BACKEND
-    
-    # usually backend = DEFAULT_BACKEND
-    if backend.find(".") == -1:
-        alias_to = BACKEND_ALIASES.get(backend.lower(), None)
-        backend = f"amq.backends.{alias_to or backend}"
-    __import__(backend)
-    backend_module = sys.modules[backend]
-    return getattr(backend_module, "Backend")
+    backend = backend or DEFAULT_BACKEND
+    if backend not in _backend_cache:
+        _backend_cache[backend] = _get_backend_cls(backend)
+    return _backend_cache[backend]

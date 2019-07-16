@@ -5,6 +5,7 @@ from amqplib.client_0_8.exceptions import AMQPChannelException
 from amq.backends.base import BaseMessage, BaseBackend
 import itertools
 import warnings
+import weakref
 
 DEFAULT_PORT = 5672
 
@@ -44,13 +45,17 @@ class Backend(BaseBackend):
     def __init__(self, connection, **kwargs):
         self.connection = connection
         self.default_port = kwargs.get("default_port", self.default_port)
-        self._channel = None
+        self._channel_ref = None
+
+    @property
+    def _channel(self):
+        return callable(self._channel_ref) and self._channel_ref()
 
     @property
     def channel(self):
         """If no channel exists, a new one is requested."""
         if not self._channel:
-            self._channel = self.connection.get_channel()
+            self._channel_ref = weakref.ref(self.connection.get_channel())
         return self._channel
 
     def establish_connection(self):
@@ -157,8 +162,9 @@ class Backend(BaseBackend):
 
     def close(self):
         """Close the channel if open."""
-        if getattr(self, "channel") and self.channel.is_open:
-            self.channel.close()
+        if self._channel and self._channel.is_open:
+            self._channel.close()
+        self._channel_ref = None
 
     def ack(self, delivery_tag):
         """Acknowledge a message by delivery tag."""
@@ -184,7 +190,19 @@ class Backend(BaseBackend):
     def publish(self, message, exchange, routing_key, mandatory=None,
                 immediate=None):
         """Publish a message to a named exchange."""
-        return self.channel.basic_publish(message, exchange=exchange,
+        ret = self.channel.basic_publish(message, exchange=exchange,
                                           routing_key=routing_key,
                                           mandatory=mandatory,
                                           immediate=immediate)
+        if mandatory or immediate:
+            self.close()
+        return ret
+        
+    def qos(self, prefetch_size, prefetch_count, apply_global=False):
+        """Request specific Quality of Service."""
+        self.channel.basic_qos(prefetch_size, prefetch_count,
+                                apply_global)
+
+    def flow(self, active):
+        """Enable/disable flow from peer."""
+        self.channel.flow(active)

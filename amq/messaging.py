@@ -13,6 +13,7 @@ class Consumer(object):
     # to show zhe channel status
     channel_open = False
     warn_if_exists = False
+    auto_declare = True
     auto_ack = False
     no_ack = False
     _closed = True
@@ -36,19 +37,21 @@ class Consumer(object):
         self.exchange_type = kwargs.get("exchange_type", self.exchange_type)
         self.warn_if_exists = kwargs.get("warn_if_exists", self.warn_if_exists)
         self.auto_ack = kwargs.get("auto_ack", self.auto_ack)
+        self.auto_declare = kwargs.get("auto_declare", self.auto_declare)
 
         # exclusive implies auto-delete.
         if self.exclusive:
             self.auto_delete = True
 
         self.consumer_tag = self._generate_consumer_tag()
-        self._declare_channel()
+        if self.auto_declare:
+            self.declare()
 
     def _generate_consumer_tag(self):
         """generate consumer tag with uuid4"""
         return f"{self.__class__.__module__}.{self.__class__.__name__}-{str(uuid.uuid4())}"
 
-    def _declare_channel(self):
+    def declare(self):
         """constructe channel:
             1. declare queue
             2. declare exchange
@@ -208,6 +211,7 @@ class Publisher:
     exchange_type = "direct"
     durable = True
     auto_delete = False
+    auto_declare = True
     serializer = None
 
     def __init__(self, connection, exchange=None, routing_key=None, **kwargs):
@@ -220,10 +224,13 @@ class Publisher:
         self.durable = kwargs.get("durable", self.durable)
         self.auto_delete = kwargs.get("auto_delete", self.auto_delete)
         self.serializer = kwargs.get("serializer", self.serializer)
-        self._declare_exchange()
+        self.auto_declare = kwargs.get("auto_declare", self.auto_declare)
         self._closed = False
 
-    def _declare_exchange(self):
+        if self.auto_declare and self.exchange:
+            self.declare()
+
+    def declare(self):
         if self.exchange:
             self.backend.exchange_declare(exchange=self.exchange,
                                           type=self.exchange_type,
@@ -348,7 +355,7 @@ class ConsumerSet(object):
         self.from_dict = from_dict or {}
         self.consumers = consumers or []
         self.callbacks = callbacks or []
-        self._open_channels = []
+        self._open_consumers = []
 
         self.backend = self.connection.create_backend()
 
@@ -400,7 +407,7 @@ class ConsumerSet(object):
                                       nowait=nowait,
                                       callback=callback,
                                       consumer_tag=consumer.consumer_tag)
-        self._open_channels.append(consumer.consumer_tag)
+        self._open_consumers.append(consumer.consumer_tag)
 
     def iterconsume(self, limit=None):
         """Cycle between all consumers in consume mode.
@@ -435,12 +442,12 @@ class ConsumerSet(object):
 
     def cancel(self):
         """Cancel a running :meth:`iterconsume` session."""
-        for consumer_tag in self._open_channels:
+        for consumer_tag in self._open_consumers:
             try:
                 self.backend.cancel(consumer_tag)
             except KeyError:
                 pass
-        self._open_channels = []
+        self._open_consumers = []
 
     def close(self):
         """Close all consumers."""
