@@ -15,7 +15,10 @@ class BaseMessage(object):
     def decode(self):
         """Deserialize the message body, returning the original
         python structure sent by the publisher."""
-        return self.decoder(self.body)
+        _deserialize = deserialize
+        if self.decoder != _deserialize:
+            _deserialize = self.decoder
+        return deserialize(self.body)
 
     def ack(self):
         """Acknowledge this message as being processed.,
