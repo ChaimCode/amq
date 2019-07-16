@@ -1,5 +1,4 @@
 from amqplib import client_0_8 as amqp
-from amq.serialization import serialize, deserialize
 
 # seconds
 DEFAULT_CONNECT_TIMEOUT = 5

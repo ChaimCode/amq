@@ -1,4 +1,10 @@
-from amq.serialization import serialize, deserialize
+from amq import serialization
+
+ACKNOWLEDGED_STATES = frozenset(["ACK", "REJECTED", "REQUEUED"])
+
+
+class MessageStateError(Exception):
+    """The message has already been acknowledged."""
 
 
 class BaseMessage(object):
@@ -9,20 +15,31 @@ class BaseMessage(object):
         self.backend = backend
         self.body = kwargs.get("body")
         self.delivery_tag = kwargs.get("delivery_tag")
-        self.decoder = kwargs.get("decoder", deserialize)
+        self.content_type = kwargs.get("content_type", "application/json")
+        self.content_encoding = kwargs.get("content_encoding")
+        self._decoded_cache = None
         self._state = "RECEIVED"
 
     def decode(self):
         """Deserialize the message body, returning the original
         python structure sent by the publisher."""
-        _deserialize = deserialize
-        if self.decoder != _deserialize:
-            _deserialize = self.decoder
-        return deserialize(self.body)
+        return serialization.decode(self.body, self.content_type,
+                                    self.content_encoding)
+
+    @property
+    def payload(self):
+        """The decoded message."""
+        # when in broadcast, it's useful
+        if not self._decoded_cache:
+            self._decoded_cache = self.decode()
+        return self._decoded_cache
 
     def ack(self):
         """Acknowledge this message as being processed.,
         This will remove the message from the queue."""
+        if self.acknowledged:
+            raise MessageStateError(
+                f"Message already acknowledged with state: {self._state}")
         self.backend.ack(self.delivery_tag)
         self._state = "ACK"
 
@@ -30,6 +47,9 @@ class BaseMessage(object):
         """Reject this message.
         The message will be discarded by the server.
         """
+        if self.acknowledged:
+            raise MessageStateError(
+                f"Message already acknowledged with state: {self._state}")
         self.backend.reject(self.delivery_tag)
         self._state = "REJECTED"
 
@@ -38,52 +58,79 @@ class BaseMessage(object):
         You must not use this method as a means of selecting messages
         to process.
         """
+        if self.acknowledged:
+            raise MessageStateError(
+                f"Message already acknowledged with state: {self._state}")
         self.backend.requeue(self.delivery_tag)
         self._state = "REQUEUED"
 
+    @property
+    def acknowledged(self):
+        """some status can't be change"""
+        return self._state in ACKNOWLEDGED_STATES
+
 
 class BaseBackend(object):
-    encoder = serialize
-    decoder = deserialize
+    """Base class for backends."""
 
     def __init__(self, connection, **kwargs):
         self.connection = connection
 
     def queue_declare(self, *args, **kwargs):
+        """Declare a queue by name."""
         pass
 
     def exchange_declare(self, *args, **kwargs):
+        """Declare an exchange by name."""
         pass
 
     def queue_bind(self, *args, **kwargs):
+        """Bind a queue to an exchange."""
         pass
 
     def get(self, *args, **kwargs):
+        """Pop a message off the queue."""
+        pass
+
+    def declare_consumer(self, *args, **kwargs):
         pass
 
     def consume(self, *args, **kwargs):
+        """Iterate over the declared consumers."""
         pass
 
     def cancel(self, *args, **kwargs):
+        """Cancel the consumer."""
         pass
 
     def ack(self, delivery_tag):
+        """Acknowledge the message."""
         pass
 
     def reject(self, delivery_tag):
+        """Reject the message."""
         pass
 
     def requeue(self, delivery_tag):
+        """Requeue the message."""
+        pass
+
+    def purge(self, queue, **kwargs):
+        """Discard all messages in the queue."""
         pass
 
     def message_to_python(self, raw_message):
+        """Convert received message body to a python datastructure."""
         return raw_message
 
     def prepare_message(self, message_data, delivery_mode, **kwargs):
+        """Prepare message for sending."""
         return message_data
 
     def publish(self, message, exchange, routing_key, **kwargs):
+        """Publish a message."""
         pass
 
     def close(self):
+        """Close the backend."""
         pass

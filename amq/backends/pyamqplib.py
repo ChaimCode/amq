@@ -3,7 +3,6 @@
 from amqplib import client_0_8 as amqp
 from amqplib.client_0_8.exceptions import AMQPChannelException
 from amq.backends.base import BaseMessage, BaseBackend
-from amq.serialization import serialize, deserialize
 import itertools
 import warnings
 
@@ -35,8 +34,6 @@ class Backend(BaseBackend):
     def __init__(self, connection, **kwargs):
         self.connection = connection
         self.channel = self.connection.connection.channel()
-        self.encoder = kwargs.get("encoder", serialize)
-        self.decoder = kwargs.get("decoder", deserialize)
 
     def queue_exists(self, queue):
         try:
@@ -49,6 +46,11 @@ class Backend(BaseBackend):
         else:
             return True
 
+    def queue_purge(self, queue, **kwargs):
+        """Discard all messages in the queue. This will delete the messages
+        and results in an empty queue."""
+        return self.channel.queue_purge(queue=queue)
+
     def queue_declare(self, queue, durable, exclusive, auto_delete,
                       warn_if_exists=False):
         """Declare a named queue."""
@@ -56,28 +58,26 @@ class Backend(BaseBackend):
         if warn_if_exists and self.queue_exists(queue):
             warnings.warn(QueueAlreadyExistsWarning(
                 QueueAlreadyExistsWarning.__doc__))
-        self.channel.queue_declare(queue=queue, 
+        self.channel.queue_declare(queue=queue,
                                    durable=durable,
                                    exclusive=exclusive,
                                    auto_delete=auto_delete)
 
     def exchange_declare(self, exchange, type, durable, auto_delete):
         """Declare an named exchange."""
-        self.channel.exchange_declare(exchange=exchange, 
+        self.channel.exchange_declare(exchange=exchange,
                                       type=type,
                                       durable=durable,
                                       auto_delete=auto_delete)
 
     def queue_bind(self, queue, exchange, routing_key):
         """Bind queue to an exchange using a routing key."""
-        self.channel.queue_bind(queue=queue, 
+        self.channel.queue_bind(queue=queue,
                                 exchange=exchange,
                                 routing_key=routing_key)
 
     def message_to_python(self, raw_message):
-        return Message(backend=self, 
-                       amqp_message=raw_message,
-                       decoder=self.decoder)
+        return Message(backend=self, amqp_message=raw_message)
 
     def get(self, queue, no_ack=False):
         """Receive a message from a declared queue by name.
@@ -91,18 +91,22 @@ class Backend(BaseBackend):
         return self.message_to_python(raw_message)
 
     def declare_consume(self, queue, no_ack, callback, consumer_tag):
-        self.channel.basic_consume(queue=queue, 
+        self.channel.basic_consume(queue=queue,
                                    no_ack=no_ack,
                                    callback=callback,
                                    consumer_tag=consumer_tag)
 
-    def consume(self, queue, no_ack, callback, consumer_tag, limit=None):
+    def declare_consumer(self, queue, no_ack, callback, consumer_tag, nowait=False):
+        """Declare a consumer."""
+        self.channel.basic_consume(queue=queue,
+                                   no_ack=no_ack,
+                                   callback=callback,
+                                   consumer_tag=consumer_tag,
+                                   nowait=nowait)
+
+    def consume(self, limit=None):
         """Returns an iterator that waits for one message at a time,
         calling the callback when messages arrive."""
-        self.declare_consume(queue=queue, 
-                            no_ack=no_ack,
-                            callback=callback,
-                            consumer_tag=consumer_tag)
         for total_message_count in itertools.count():
             if limit and total_message_count >= limit:
                 raise StopIteration
@@ -130,9 +134,12 @@ class Backend(BaseBackend):
         """Reject and requeue a message by delivery tag."""
         return self.channel.basic_reject(delivery_tag, requeue=True)
 
-    def prepare_message(self, message_data, delivery_mode, priority=None):
+    def prepare_message(self, message_data, delivery_mode, priority=None,
+                        content_type=None, content_encoding=None):
         """Encapsulate data into a AMQP message."""
-        message = amqp.Message(message_data, priority=priority)
+        message = amqp.Message(message_data, priority=priority,
+                               content_type=content_type,
+                               content_encoding=content_encoding)
         message.properties["delivery_mode"] = delivery_mode
         return message
 
