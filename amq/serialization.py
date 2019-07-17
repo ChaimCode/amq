@@ -66,7 +66,7 @@ class SerializerRegistry(object):
     def decode(self, data, content_type, content_encoding):
         """Deserialize a data stream as serialized using ``encode``
         """
-        content_type = content_type or 'application/data'
+        content_type = content_type or 'application/json'
         content_encoding = (content_encoding or 'utf-8').lower()
 
         if content_encoding not in ('binary', 'ascii-8bit') and not isinstance(data, str):

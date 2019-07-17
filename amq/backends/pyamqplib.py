@@ -1,9 +1,7 @@
 """`amqplib`_ backend for amq.
 """
-from amqplib.client_0_8 import transport
 from amqplib import client_0_8 as amqp
 from amqplib.client_0_8.exceptions import AMQPChannelException
-from amqplib.client_0_8.serialization import AMQPReader, AMQPWriter
 from amq.backends.base import BaseMessage, BaseBackend
 import itertools
 import warnings

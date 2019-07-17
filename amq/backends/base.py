@@ -17,7 +17,7 @@ class BaseMessage(object):
         self.backend = backend
         self.body = kwargs.get("body")
         self.delivery_tag = kwargs.get("delivery_tag")
-        self.content_type = kwargs.get("content_type", "application/json")
+        self.content_type = kwargs.get("content_type")
         self.content_encoding = kwargs.get("content_encoding")
         self.delivery_info = kwargs.get("delivery_info", {})
         self._decoded_cache = None
